@@ -1,0 +1,127 @@
+
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#123b70">
+  <title>ARx Business Plus</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f3f6fb;
+      color: #172b4d;
+    }
+    header {
+      background: #123b70;
+      color: white;
+      padding: 22px 18px;
+    }
+    header h1 { margin: 0 0 8px; font-size: 25px; }
+    header p { margin: 0; color: #dbeafe; }
+    main { max-width: 900px; margin: auto; padding: 18px; }
+    .card {
+      background: white;
+      border-radius: 14px;
+      padding: 18px;
+      margin-bottom: 16px;
+      box-shadow: 0 3px 14px #172b4d0d;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+      gap: 12px;
+    }
+    .stat {
+      background: #edf4ff;
+      padding: 16px;
+      border-radius: 10px;
+    }
+    .stat strong { display: block; font-size: 23px; margin-top: 8px; }
+    label { display: block; margin: 12px 0 6px; }
+    input, button {
+      width: 100%;
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 16px;
+    }
+    input { border: 1px solid #cbd5e1; }
+    button {
+      background: #1769aa;
+      color: white;
+      border: 0;
+      margin-top: 12px;
+      cursor: pointer;
+    }
+    .muted { color: #64748b; line-height: 1.7; }
+    #status { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ARx Business Plus</h1>
+    <p>منصة إدارة الأعمال الذكية</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>الاتصال بالخادم</h2>
+      <p class="muted">أدخل رابط API بعد نشر الخادم لربط الواجهة بالخدمات الفعلية.</p>
+      <label for="api">رابط الخادم</label>
+      <input id="api" type="url" placeholder="https://your-service.onrender.com">
+      <button id="connect">فحص الاتصال</button>
+      <p id="status" role="status">لم يتم فحص الاتصال بعد.</p>
+    </section>
+
+    <section class="card">
+      <h2>لوحة التحكم</h2>
+      <div class="grid">
+        <div class="stat">العملاء<strong id="customers">—</strong></div>
+        <div class="stat">المنتجات<strong id="products">—</strong></div>
+        <div class="stat">الموظفون<strong>—</strong></div>
+        <div class="stat">التقارير<strong>—</strong></div>
+      </div>
+      <p class="muted">الأرقام غير متاحة قبل ربط قاعدة البيانات وتسجيل الدخول.</p>
+    </section>
+
+    <section class="card">
+      <h2>خدمات المنصة</h2>
+      <div class="grid">
+        <div class="stat">المحاسبة</div>
+        <div class="stat">المبيعات والعملاء</div>
+        <div class="stat">المخازن</div>
+        <div class="stat">الموارد البشرية</div>
+        <div class="stat">التقارير المالية</div>
+        <div class="stat">المستخدمون والصلاحيات</div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const apiInput = document.getElementById("api");
+    const statusBox = document.getElementById("status");
+
+    document.getElementById("connect").addEventListener("click", async () => {
+      const base = apiInput.value.trim().replace(/\/+$/, "");
+
+      if (!base) {
+        statusBox.textContent = "اكتب رابط الخادم أولًا.";
+        return;
+      }
+
+      try {
+        const response = await fetch(base + "/health");
+        const data = await response.json();
+        statusBox.textContent = response.ok
+          ? "استجابة الخادم: " + JSON.stringify(data)
+          : "الخادم ردّ برمز: " + response.status;
+      } catch {
+        statusBox.textContent =
+          "تعذّر الاتصال. تأكد من نشر الخادم وإعداد الاتصال.";
+      }
+    });
+  </script>
+</body>
+</html>
