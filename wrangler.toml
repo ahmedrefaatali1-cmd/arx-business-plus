@@ -1,0 +1,9 @@
+
+name = "arx-global-business"
+main = "server.js"
+compatibility_date = "2026-10-19"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "arx-global-db"
+database_id = "00000004-00000000-00005109-35248fcf4234eb21eab2b5949ecb089a"
