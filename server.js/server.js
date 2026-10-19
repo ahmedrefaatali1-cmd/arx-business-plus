@@ -1,275 +1,256 @@
-const express = require("express");
-const dotenv = require("dotenv");
-const jwt = require("jsonwebtoken");
-const bcrypt = require("bcryptjs");
-const { Pool } = require("pg");
 
-dotenv.config();
+const encoder = new TextEncoder();
 
-const app = express();
-app.use(express.json());
+const cors = {
+  "Content-Type": "application/json; charset=utf-8",
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization"
+};
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL
-    ? { rejectUnauthorized: false }
-    : false
-});
-
-const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET;
-
-app.get("/", (req, res) => {
-  res.json({
-    app: "ARx Business Plus",
-    status: "server_running",
-    message: "API is online"
-  });
-});
-
-app.get("/health", async (req, res) => {
-  try {
-    await pool.query("SELECT 1");
-    res.json({ server: "ok", database: "connected" });
-  } catch (error) {
-    res.status(503).json({
-      server: "ok",
-      database: "not_configured"
-    });
-  }
-});
-
-app.post("/setup", async (req, res) => {
-  if (!process.env.SETUP_KEY ||
-      req.get("x-setup-key") !== process.env.SETUP_KEY) {
-    return res.status(403).json({ error: "Forbidden" });
-  }
-
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS companies (
-        id BIGSERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-
-      CREATE TABLE IF NOT EXISTS users (
-        id BIGSERIAL PRIMARY KEY,
-        company_id BIGINT NOT NULL REFERENCES companies(id),
-        email TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'owner',
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-
-      CREATE TABLE IF NOT EXISTS customers (
-        id BIGSERIAL PRIMARY KEY,
-        company_id BIGINT NOT NULL REFERENCES companies(id),
-        name TEXT NOT NULL,
-        phone TEXT,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      );
-
-      CREATE TABLE IF NOT EXISTS products (
-        id BIGSERIAL PRIMARY KEY,
-        company_id BIGINT NOT NULL REFERENCES companies(id),
-        name TEXT NOT NULL,
-        quantity NUMERIC NOT NULL DEFAULT 0,
-        price NUMERIC NOT NULL DEFAULT 0
-      );
-
-      CREATE TABLE IF NOT EXISTS employees (
-        id BIGSERIAL PRIMARY KEY,
-        company_id BIGINT NOT NULL REFERENCES companies(id),
-        name TEXT NOT NULL,
-        job_title TEXT
-      );
-    `);
-
-    res.json({ success: true, message: "Tables created" });
-  } catch (error) {
-    console.error("Setup failed:", error.message);
-    res.status(500).json({ error: "Database setup failed" });
-  }
-});
-
-app.post("/register", async (req, res) => {
-  const { companyName, email, password } = req.body || {};
-
-  if (!companyName || !email ||
-      typeof password !== "string" || password.length < 12) {
-    return res.status(400).json({
-      error: "Company, email and password (12+ characters) required"
-    });
-  }
-
-  if (!JWT_SECRET) {
-    return res.status(503).json({ error: "Server configuration incomplete" });
-  }
-
-  const client = await pool.connect();
-
-  try {
-    await client.query("BEGIN");
-
-    const company = await client.query(
-      "INSERT INTO companies(name) VALUES($1) RETURNING id, name",
-      [companyName]
-    );
-
-    const passwordHash = await bcrypt.hash(password, 12);
-
-    const user = await client.query(
-      `INSERT INTO users(company_id, email, password_hash, role)
-       VALUES($1, $2, $3, 'owner')
-       RETURNING id, company_id, email, role`,
-      [company.rows[0].id, email.toLowerCase(), passwordHash]
-    );
-
-    await client.query("COMMIT");
-
-    const token = jwt.sign({
-      sub: String(user.rows[0].id),
-      companyId: String(user.rows[0].company_id),
-      role: user.rows[0].role
-    }, JWT_SECRET, { expiresIn: "2h" });
-
-    res.status(201).json({
-      user: user.rows[0],
-      company: company.rows[0],
-      token
-    });
-  } catch (error) {
-    await client.query("ROLLBACK");
-    res.status(400).json({ error: "Registration failed; check email and database" });
-  } finally {
-    client.release();
-  }
-});
-
-app.post("/login", async (req, res) => {
-  const { email, password } = req.body || {};
-
-  if (!email || !password || !JWT_SECRET) {
-    return res.status(400).json({ error: "Email and password required" });
-  }
-
-  try {
-    const result = await pool.query(
-      `SELECT id, company_id, email, password_hash, role
-       FROM users WHERE email = $1`,
-      [email.toLowerCase()]
-    );
-
-    if (!result.rows.length ||
-        !(await bcrypt.compare(password, result.rows[0].password_hash))) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    const user = result.rows[0];
-    const token = jwt.sign({
-      sub: String(user.id),
-      companyId: String(user.company_id),
-      role: user.role
-    }, JWT_SECRET, { expiresIn: "2h" });
-
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        companyId: user.company_id,
-        email: user.email,
-        role: user.role
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: "Login unavailable" });
-  }
-});
-
-function authenticate(req, res, next) {
-  const header = req.get("authorization") || "";
-
-  if (!JWT_SECRET || !header.startsWith("Bearer ")) {
-    return res.status(401).json({ error: "Authentication required" });
-  }
-
-  try {
-    req.user = jwt.verify(header.slice(7), JWT_SECRET);
-    next();
-  } catch {
-    res.status(401).json({ error: "Invalid or expired token" });
-  }
+function reply(data, status = 200) {
+  return new Response(JSON.stringify(data), { status, headers: cors });
 }
 
-app.get("/api/customers", authenticate, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT id, name, phone, created_at FROM customers
-       WHERE company_id = $1 ORDER BY id DESC`,
-      [req.user.companyId]
-    );
-    res.json(result.rows);
-  } catch {
-    res.status(500).json({ error: "Could not load customers" });
+function b64(bytes) {
+  let s = "";
+  for (const b of new Uint8Array(bytes)) s += String.fromCharCode(b);
+  return btoa(s).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+}
+
+async function hashPassword(password, salt) {
+  const key = await crypto.subtle.importKey(
+    "raw", encoder.encode(password), "PBKDF2", false, ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits({
+    name: "PBKDF2",
+    salt,
+    iterations: 210000,
+    hash: "SHA-256"
+  }, key, 256);
+  return b64(bits);
+}
+
+async function makePassword(password) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  return { salt: b64(salt), hash: await hashPassword(password, salt) };
+}
+
+async function verifyPassword(password, saltText, expected) {
+  const salt = Uint8Array.from(
+    atob(saltText.replace(/-/g, "+").replace(/_/g, "/") +
+    "=".repeat((4 - saltText.length % 4) % 4)),
+    c => c.charCodeAt(0)
+  );
+  const actual = await hashPassword(password, salt);
+  return actual === expected;
+}
+
+async function tokenFor(user, secret) {
+  const header = b64(encoder.encode(JSON.stringify({ alg: "HS256", typ: "JWT" })));
+  const now = Math.floor(Date.now() / 1000);
+  const payload = b64(encoder.encode(JSON.stringify({
+    sub: String(user.id),
+    companyId: String(user.company_id),
+    role: user.role,
+    iat: now,
+    exp: now + 7200
+  })));
+  const data = `${header}.${payload}`;
+  const key = await crypto.subtle.importKey(
+    "raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" },
+    false, ["sign"]
+  );
+  return data + "." + b64(await crypto.subtle.sign("HMAC", key, encoder.encode(data)));
+}
+
+async function authenticate(request, env) {
+  const header = request.headers.get("Authorization") || "";
+  if (!header.startsWith("Bearer ")) return null;
+
+  const parts = header.slice(7).split(".");
+  if (parts.length !== 3) return null;
+
+  const key = await crypto.subtle.importKey(
+    "raw", encoder.encode(env.JWT_SECRET),
+    { name: "HMAC", hash: "SHA-256" }, false, ["verify"]
+  );
+  const valid = await crypto.subtle.verify(
+    "HMAC", key,
+    Uint8Array.from(atob(parts[2].replace(/-/g, "+").replace(/_/g, "/") +
+      "=".repeat((4 - parts[2].length % 4) % 4)), c => c.charCodeAt(0)),
+    encoder.encode(parts[0] + "." + parts[1])
+  );
+  if (!valid) return null;
+
+  const payload = JSON.parse(atob(
+    parts[1].replace(/-/g, "+").replace(/_/g, "/") +
+    "=".repeat((4 - parts[1].length % 4) % 4)
+  ));
+  if (!payload.sub || !payload.companyId || payload.exp <= Date.now() / 1000)
+    return null;
+  return payload;
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (request.method === "OPTIONS") return new Response(null, { headers: cors });
+
+    if (!env.DB) return reply({ error: "D1 binding DB is not configured" }, 503);
+    if (!env.JWT_SECRET) return reply({ error: "JWT_SECRET is not configured" }, 503);
+
+    try {
+      await env.DB.prepare(`
+        CREATE TABLE IF NOT EXISTS arx_companies (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `).run();
+
+      await env.DB.prepare(`
+        CREATE TABLE IF NOT EXISTS arx_users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          company_id INTEGER NOT NULL,
+          email TEXT NOT NULL UNIQUE,
+          password_hash TEXT NOT NULL,
+          password_salt TEXT NOT NULL,
+          role TEXT NOT NULL DEFAULT 'owner',
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `).run();
+
+      await env.DB.prepare(`
+        CREATE TABLE IF NOT EXISTS arx_customers (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          company_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          phone TEXT,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `).run();
+
+      await env.DB.prepare(`
+        CREATE TABLE IF NOT EXISTS arx_products (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          company_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          quantity REAL NOT NULL DEFAULT 0,
+          price REAL NOT NULL DEFAULT 0,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+      `).run();
+
+      if (url.pathname === "/" || url.pathname === "/health") {
+        return reply({
+          app: "ARx Business Plus",
+          server: "ok",
+          database: "connected"
+        });
+      }
+
+      if (request.method === "POST" && url.pathname === "/register") {
+        const body = await request.json();
+        const companyName = String(body.companyName || "").trim();
+        const email = String(body.email || "").trim().toLowerCase();
+        const password = body.password;
+
+        if (!companyName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+            typeof password !== "string" || password.length < 12) {
+          return reply({ error: "اسم الشركة وبريد صحيح وكلمة مرور 12 حرفًا على الأقل مطلوبة" }, 400);
+        }
+
+        const existing = await env.DB.prepare(
+          "SELECT id FROM arx_users WHERE email = ?"
+        ).bind(email).first();
+        if (existing) return reply({ error: "البريد مسجل بالفعل" }, 409);
+
+        const pw = await makePassword(password);
+        const company = await env.DB.prepare(
+          "INSERT INTO arx_companies(name) VALUES (?)"
+        ).bind(companyName).run();
+
+        const user = await env.DB.prepare(
+          "INSERT INTO arx_users(company_id,email,password_hash,password_salt,role) VALUES (?,?,?,?,?)"
+        ).bind(company.meta.last_row_id, email, pw.hash, pw.salt, "owner").run();
+
+        const record = {
+          id: user.meta.last_row_id,
+          company_id: company.meta.last_row_id,
+          email,
+          role: "owner"
+        };
+        return reply({
+          token: await tokenFor(record, env.JWT_SECRET),
+          user: { id: record.id, email, role: record.role },
+          company: { id: record.company_id, name: companyName }
+        }, 201);
+      }
+
+      if (request.method === "POST" && url.pathname === "/login") {
+        const body = await request.json();
+        const email = String(body.email || "").trim().toLowerCase();
+        if (typeof body.password !== "string" || !email)
+          return reply({ error: "البريد وكلمة المرور مطلوبان" }, 400);
+
+        const user = await env.DB.prepare(
+          "SELECT * FROM arx_users WHERE email = ?"
+        ).bind(email).first();
+
+        if (!user || !(await verifyPassword(
+          body.password, user.password_salt, user.password_hash
+        ))) return reply({ error: "بيانات الدخول غير صحيحة" }, 401);
+
+        return reply({
+          token: await tokenFor(user, env.JWT_SECRET),
+          user: { id: user.id, email: user.email, role: user.role, companyId: user.company_id }
+        });
+      }
+
+      const protectedRoutes = ["/api/customers", "/api/products"];
+      if (protectedRoutes.includes(url.pathname)) {
+        const user = await authenticate(request, env);
+        if (!user) return reply({ error: "تسجيل الدخول مطلوب أو انتهت الجلسة" }, 401);
+
+        const table = url.pathname.endsWith("customers") ? "arx_customers" : "arx_products";
+
+        if (request.method === "GET") {
+          const result = await env.DB.prepare(
+            `SELECT * FROM ${table} WHERE company_id = ? ORDER BY id DESC`
+          ).bind(Number(user.companyId)).all();
+          return reply(result.results);
+        }
+
+        if (request.method === "POST") {
+          const body = await request.json();
+          const name = String(body.name || "").trim();
+          if (!name) return reply({ error: "الاسم مطلوب" }, 400);
+
+          if (table === "arx_customers") {
+            const result = await env.DB.prepare(
+              "INSERT INTO arx_customers(company_id,name,phone) VALUES (?,?,?)"
+            ).bind(Number(user.companyId), name, String(body.phone || "").trim() || null).run();
+            return reply({ id: result.meta.last_row_id, name, phone: body.phone || null }, 201);
+          }
+
+          const quantity = Number(body.quantity ?? 0);
+          const price = Number(body.price ?? 0);
+          if (!Number.isFinite(quantity) || !Number.isFinite(price) ||
+              quantity < 0 || price < 0)
+            return reply({ error: "الكمية والسعر يجب أن يكونا أرقامًا غير سالبة" }, 400);
+
+          const result = await env.DB.prepare(
+            "INSERT INTO arx_products(company_id,name,quantity,price) VALUES (?,?,?,?)"
+          ).bind(Number(user.companyId), name, quantity, price).run();
+          return reply({ id: result.meta.last_row_id, name, quantity, price }, 201);
+        }
+      }
+
+      return reply({ error: "المسار غير موجود" }, 404);
+    } catch (error) {
+      console.error("ARx API error:", error);
+      return reply({ error: "حدث خطأ داخلي؛ راجع سجلات Worker" }, 500);
+    }
   }
-});
-
-app.post("/api/customers", authenticate, async (req, res) => {
-  const { name, phone } = req.body || {};
-
-  if (!name || typeof name !== "string") {
-    return res.status(400).json({ error: "Customer name required" });
-  }
-
-  try {
-    const result = await pool.query(
-      `INSERT INTO customers(company_id, name, phone)
-       VALUES($1, $2, $3) RETURNING id, name, phone`,
-      [req.user.companyId, name, phone || null]
-    );
-    res.status(201).json(result.rows[0]);
-  } catch {
-    res.status(500).json({ error: "Could not save customer" });
-  }
-});
-
-app.get("/api/products", authenticate, async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT id, name, quantity, price FROM products
-       WHERE company_id = $1 ORDER BY id DESC`,
-      [req.user.companyId]
-    );
-    res.json(result.rows);
-  } catch {
-    res.status(500).json({ error: "Could not load products" });
-  }
-});
-
-app.post("/api/products", authenticate, async (req, res) => {
-  const { name, quantity = 0, price = 0 } = req.body || {};
-
-  if (!name || !Number.isFinite(Number(quantity)) ||
-      !Number.isFinite(Number(price)) ||
-      Number(quantity) < 0 || Number(price) < 0) {
-    return res.status(400).json({ error: "Invalid product data" });
-  }
-
-  try {
-    const result = await pool.query(
-      `INSERT INTO products(company_id, name, quantity, price)
-       VALUES($1, $2, $3, $4)
-       RETURNING id, name, quantity, price`,
-      [req.user.companyId, name, quantity, price]
-    );
-    res.status(201).json(result.rows[0]);
-  } catch {
-    res.status(500).json({ error: "Could not save product" });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`ARx Business Plus API listening on ${PORT}`);
-});
-      
+};
